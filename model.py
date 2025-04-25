@@ -55,6 +55,15 @@ class BeliefMessagePassing(MessagePassing):
         edge_indices_over_time = [edge_index.clone()]
         feature_snapshots = []
 
+        node_ids = torch.arange(x.size(0))  # Initial node IDs
+        node_histories = {int(i): [] for i in node_ids.tolist()}  # Dict of lists
+        i_row, i_col = edge_index
+        init_deg = degree(i_row, num_nodes=x.size(0), dtype=torch.float).view(-1, 1)
+
+        for i, nid in enumerate(node_ids):
+            node_features = torch.cat([x[i], alpha_matrix[i], confidence_bound[i], init_deg[i]])
+            node_histories[int(nid)].append(node_features.tolist())
+            
         # Message passing for multiple timesteps
         for _ in tqdm(range(self.num_timesteps), desc="Belief Propagation Steps"):
             if verbose:
@@ -73,22 +82,31 @@ class BeliefMessagePassing(MessagePassing):
             x = self.propagate(edge_index, x=x, norm=norm, alpha_matrix=alpha_matrix,
                               confidence_bound=confidence_bound)
             edge_index = self.update_edges(edge_index, x, confidence_bound)
-            edge_index, x, alpha_matrix, confidence_bound = self.node_churn(edge_index, x, 
+            edge_index, x, alpha_matrix, confidence_bound, node_ids = self.node_churn(edge_index, x, 
                                                                             alpha_matrix, 
                                                                             confidence_bound,
-                                                                            gamma)
-            edge_index, x, alpha_matrix, confidence_bound = self.add_nodes(edge_index, x,
+                                                                            gamma, node_ids)
+            edge_index, x, alpha_matrix, confidence_bound, node_ids = self.add_nodes(edge_index, x,
                                                                            alpha_matrix,
                                                                            confidence_bound,
-                                                                           r, N_max, lambda_m)
+                                                                           r, N_max, lambda_m, node_ids)
 
             embeddings_over_time.append(x.clone().detach())
-            edge_indices_over_time.append(remove_self_loops(edge_index.clone())[0])
+            edge_index_no_loop = remove_self_loops(edge_index.clone())[0]
+            edge_indices_over_time.append(edge_index_no_loop)
+            new_row, new_col = edge_index_no_loop
+            node_degree = degree(new_row, num_nodes=x.size(0), dtype=torch.float).view(-1, 1)
             
             timestep_features = torch.cat([x, alpha_matrix, confidence_bound], dim=1)
             feature_snapshots.append(timestep_features.clone().detach())
-            
-        return x, embeddings_over_time, edge_indices_over_time, feature_snapshots
+
+            for i, nid in enumerate(node_ids):
+                if int(nid) not in node_histories:
+                    node_histories[int(nid)] = []
+                node_features = torch.cat([x[i], alpha_matrix[i], confidence_bound[i], node_degree[i]])
+                node_histories[int(nid)].append(node_features.tolist())
+                
+        return x, embeddings_over_time, edge_indices_over_time, feature_snapshots, node_histories
 
     def message(self, x_j, norm):
         """
@@ -155,7 +173,7 @@ class BeliefMessagePassing(MessagePassing):
 
         return edge_index
 
-    def add_nodes(self, edge_index, x, alpha_matrix, confidence_bound, r, N_max, lambda_m):
+    def add_nodes(self, edge_index, x, alpha_matrix, confidence_bound, r, N_max, lambda_m, node_ids):
         num_nodes = x.size(0)
 
         new_nodes = self.logistic_growth(num_nodes, r, N_max)
@@ -172,9 +190,12 @@ class BeliefMessagePassing(MessagePassing):
 
         edge_index = self.barabasi_albert_attachment(edge_index, num_nodes, new_nodes, lambda_m)
 
-        return edge_index, x, alpha_matrix, confidence_bound
+        new_node_ids = torch.arange(max(node_ids).item() + 1, max(node_ids).item() + 1 + new_nodes)
+        node_ids = torch.cat([node_ids, new_node_ids], dim=0)
 
-    def node_churn(self, edge_index, x, alpha_matrix, confidence_bound, gamma):
+        return edge_index, x, alpha_matrix, confidence_bound, node_ids
+
+    def node_churn(self, edge_index, x, alpha_matrix, confidence_bound, gamma, node_ids):
         num_nodes = x.size(0)
         degrees = degree(edge_index[0], num_nodes=num_nodes, dtype=torch.float)
 
@@ -194,7 +215,9 @@ class BeliefMessagePassing(MessagePassing):
         edge_index = edge_index[:, valid_edges]
         edge_index = node_map[edge_index]
 
-        return edge_index, x, alpha_matrix, confidence_bound
+        node_ids = node_ids[remove_mask]
+
+        return edge_index, x, alpha_matrix, confidence_bound, node_ids
         
     def update_edges(self, edge_index, x, confidence_bound):
         row, col = edge_index
