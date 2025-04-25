@@ -53,6 +53,7 @@ class BeliefMessagePassing(MessagePassing):
         # Store belief embeddings at each timestep
         embeddings_over_time = [x.clone().detach()]
         edge_indices_over_time = [edge_index.clone()]
+        feature_snapshots = []
 
         # Message passing for multiple timesteps
         for _ in tqdm(range(self.num_timesteps), desc="Belief Propagation Steps"):
@@ -84,7 +85,10 @@ class BeliefMessagePassing(MessagePassing):
             embeddings_over_time.append(x.clone().detach())
             edge_indices_over_time.append(remove_self_loops(edge_index.clone())[0])
             
-        return x, embeddings_over_time, edge_indices_over_time
+            timestep_features = torch.cat([x, alpha_matrix, confidence_bound], dim=1)
+            feature_snapshots.append(timestep_features.clone().detach())
+            
+        return x, embeddings_over_time, edge_indices_over_time, feature_snapshots
 
     def message(self, x_j, norm):
         """
